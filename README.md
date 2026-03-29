@@ -100,9 +100,41 @@ No machine holds its own backup on itself. The snapshot is always somewhere else
 
 Shadow doesn't run on a schedule. He doesn't announce himself. He watches the network, waits for quiet, and moves data while you sleep. Set and forget. A weapon that fires itself.
 
+## Windows support (VSS)
+
+Windows machines are full mesh members. Shadow uses **Volume Shadow Copy Service (VSS)** for consistent snapshots on Windows — the same technology Windows uses for System Restore.
+
+- VSS creates a point-in-time shadow copy of the volume
+- Shadow mounts the shadow copy, robocopy's key directories
+- Snapshots include: user profile, SSH config, Windows Terminal settings
+- If VSS fails (permissions, service stopped), falls back to direct robocopy
+- Distribution uses scp between Windows and Linux machines
+
+**Windows requirements:**
+- OpenSSH Server running (already set up on Minisforum)
+- Admin user in `administrators_authorized_keys`
+- VSS service running (default on Windows 11)
+
+**No extra software needed on Windows.** It's all built-in.
+
+## completely autonomous
+
+Once mixer is installed and the daemon is running, there is nothing to do. Ever.
+
+- Shadow watches the network — moves data when traffic is quiet
+- New machine joins — `mixer add` and it's in the mesh instantly
+- Machine goes offline — Shadow skips it, distributes to the rest
+- Machine comes back — next cycle picks it up automatically
+- Snapshots rotate — old ones get cleaned, fresh ones replace them
+- No timers, no cron jobs, no maintenance. Set and forget.
+
+This is a weapon that fires itself.
+
 ## Shadow
 
 Shadow is agent #6 in the [halo-ai family](https://github.com/bong-water-water-bong/halo-ai), part of Meek's Reflex security group. He monitors file integrity and manages the SSH mesh. mixer is his primary tool.
+
+He doesn't ask. He doesn't announce. He moves in silence. When everything goes wrong, he's the one who has the data.
 
 ## license
 

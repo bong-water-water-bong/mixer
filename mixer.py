@@ -200,19 +200,55 @@ class Mixer:
         snap_name = f"mixer-{machine_name}-{ts}"
 
         if m.btrfs:
-            # btrfs snapshot
+            # Linux btrfs snapshot
             snap_path = f"{m.snapshot_path}/{snap_name}"
             cmd = f"sudo btrfs subvolume snapshot -r / {snap_path}"
             code, out, err = m.ssh(cmd, timeout=120)
             if code != 0:
                 log.error(f"Snapshot failed on {machine_name}: {err}")
                 return None
+
+        elif m.os_type == "windows":
+            # Windows VSS shadow copy + robocopy to snapshot dir
+            snap_path = f"{m.snapshot_path}\\{snap_name}"
+            vss_cmds = (
+                f'powershell -Command "'
+                f"New-Item -Path '{snap_path}' -ItemType Directory -Force | Out-Null; "
+                # Create VSS shadow copy
+                f"$shadow = (Get-WmiObject -List Win32_ShadowCopy).Create('C:\\', 'ClientAccessible'); "
+                f"$id = $shadow.ShadowID; "
+                f"$sc = Get-WmiObject Win32_ShadowCopy | Where-Object {{ $_.ID -eq $id }}; "
+                f"$device = $sc.DeviceObject; "
+                # Create symlink to shadow copy and robocopy key dirs
+                f"$link = 'C:\\mixer-shadow-temp'; "
+                f"cmd /c mklink /d $link ($device + '\\'); "
+                f"robocopy $link\\Users\\bcloud '{snap_path}\\Users' /E /XJ /R:1 /W:1 /NP /NFL /NDL; "
+                f"robocopy $link\\ProgramData\\ssh '{snap_path}\\ssh' /E /R:1 /W:1 /NP /NFL /NDL; "
+                # Cleanup
+                f"cmd /c rmdir $link; "
+                f"$sc.Delete(); "
+                f"Write-Host 'VSS snapshot complete'"
+                f'"'
+            )
+            code, out, err = m.ssh(vss_cmds, timeout=300)
+            if code != 0:
+                # Fallback to simple robocopy without VSS
+                log.warning(f"VSS failed on {machine_name}, falling back to robocopy: {err[:100]}")
+                fallback_cmds = (
+                    f'powershell -Command "'
+                    f"New-Item -Path '{snap_path}' -ItemType Directory -Force | Out-Null; "
+                    f"robocopy C:\\Users\\bcloud '{snap_path}\\Users' /E /XJ /R:1 /W:1 /NP /NFL /NDL; "
+                    f"robocopy C:\\ProgramData\\ssh '{snap_path}\\ssh' /E /R:1 /W:1 /NP /NFL /NDL; "
+                    f"robocopy C:\\Users\\bcloud\\AppData\\Local\\Packages\\Microsoft.WindowsTerminal_8wekyb3d8bbwe '{snap_path}\\terminal' /E /R:1 /W:1 /NP /NFL /NDL"
+                    f'"'
+                )
+                code, out, err = m.ssh(fallback_cmds, timeout=300)
+
         else:
-            # rsync-based snapshot for non-btrfs (Windows, etc)
+            # Linux non-btrfs — rsync key directories
             snap_path = f"{m.snapshot_path}/{snap_name}"
             cmd = f"mkdir -p {snap_path}"
             m.ssh(cmd)
-            # Snapshot key directories
             dirs = "/etc /home /srv/ai/configs /srv/ai/freeze"
             cmd = f"for d in {dirs}; do [ -d $d ] && rsync -a $d {snap_path}/; done"
             code, out, err = m.ssh(cmd, timeout=300)
@@ -220,8 +256,15 @@ class Mixer:
                 log.warning(f"Partial snapshot on {machine_name}: {err}")
 
         # Get size
-        code, out, _ = m.ssh(f"du -sm {snap_path} 2>/dev/null | cut -f1")
-        size_mb = int(out) if code == 0 and out.isdigit() else 0
+        if m.os_type == "windows":
+            code, out, _ = m.ssh(f'powershell -Command "(Get-ChildItem -Recurse \'{snap_path}\' | Measure-Object -Property Length -Sum).Sum / 1MB"', timeout=30)
+            try:
+                size_mb = int(float(out.strip()))
+            except Exception:
+                size_mb = 0
+        else:
+            code, out, _ = m.ssh(f"du -sm {snap_path} 2>/dev/null | cut -f1")
+            size_mb = int(out) if code == 0 and out.isdigit() else 0
 
         snap = Snapshot(
             machine=machine_name,
@@ -248,30 +291,68 @@ class Mixer:
 
         for src_name, src in reachable.items():
             # Find latest snapshot on source
-            code, out, _ = src.ssh(
-                f"ls -1t {src.snapshot_path}/ 2>/dev/null | grep '^mixer-' | head -1"
-            )
-            if code != 0 or not out:
+            if src.os_type == "windows":
+                code, out, _ = src.ssh(
+                    f'powershell -Command "(Get-ChildItem \'{src.snapshot_path}\' -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name"'
+                )
+            else:
+                code, out, _ = src.ssh(
+                    f"ls -1t {src.snapshot_path}/ 2>/dev/null | grep '^mixer-' | head -1"
+                )
+            if code != 0 or not out.strip():
                 log.warning(f"No snapshots on {src_name} to distribute")
                 continue
 
             latest_snap = out.strip()
-            src_path = f"{src.snapshot_path}/{latest_snap}"
+            if src.os_type == "windows":
+                src_path = f"{src.snapshot_path}\\{latest_snap}"
+            else:
+                src_path = f"{src.snapshot_path}/{latest_snap}"
 
             # Send to every OTHER reachable machine
             for dst_name, dst in reachable.items():
                 if dst_name == src_name:
-                    continue  # don't send to yourself
+                    continue
 
                 log.info(f"  {src_name} → {dst_name} ({latest_snap})")
 
                 if src.btrfs and dst.btrfs:
+                    # btrfs to btrfs — fastest path
                     cmd = (
                         f"sudo btrfs send {src_path} | "
                         f"ssh {dst.user}@{dst.host} 'sudo btrfs receive {dst.receive_path}/'"
                     )
                     code, out, err = src.ssh(cmd, timeout=600)
+
+                elif src.os_type == "windows" and dst.os_type != "windows":
+                    # Windows to Linux — scp the snapshot dir
+                    dst_dir = f"{dst.receive_path}/{latest_snap}"
+                    cmd = (
+                        f'powershell -Command "scp -r \'{src_path}\' '
+                        f'{dst.user}@{dst.host}:{dst_dir}"'
+                    )
+                    code, out, err = src.ssh(cmd, timeout=600)
+
+                elif src.os_type != "windows" and dst.os_type == "windows":
+                    # Linux to Windows — scp to Windows receive path
+                    dst_dir = f"{dst.receive_path}\\{latest_snap}"
+                    cmd = (
+                        f"scp -r {src_path} "
+                        f"{dst.user}@{dst.host}:'{dst_dir}'"
+                    )
+                    code, out, err = src.ssh(cmd, timeout=600)
+
+                elif src.os_type == "windows" and dst.os_type == "windows":
+                    # Windows to Windows — scp
+                    dst_dir = f"{dst.receive_path}\\{latest_snap}"
+                    cmd = (
+                        f'powershell -Command "scp -r \'{src_path}\' '
+                        f'{dst.user}@{dst.host}:\'{dst_dir}\'"'
+                    )
+                    code, out, err = src.ssh(cmd, timeout=600)
+
                 else:
+                    # Linux non-btrfs to any — rsync
                     cmd = (
                         f"rsync -azP --delete {src_path}/ "
                         f"{dst.user}@{dst.host}:{dst.receive_path}/{latest_snap}/"
