@@ -239,24 +239,14 @@ class Mixer:
 
     # ── Distribute ────────────────────────────────────
     def distribute(self):
-        """Send each machine's latest snapshot to the next machine in the ring."""
-        print("\n  shadow is distributing snapshots around the ring...\n")
+        """Full mesh — every machine sends its snapshot to every OTHER machine.
+        4 machines = each machine holds 3 snapshots (one from each neighbor)."""
+        print("\n  shadow is distributing snapshots across the mesh...\n")
 
-        for i, src_name in enumerate(self.ring):
-            dst_name = self.ring[(i + 1) % len(self.ring)]
-            src = self.machines.get(src_name)
-            dst = self.machines.get(dst_name)
+        reachable = {n: m for n, m in self.machines.items() if m.is_reachable()}
+        log.info(f"Reachable machines: {list(reachable.keys())}")
 
-            if not src or not dst:
-                continue
-
-            if not src.is_reachable():
-                log.warning(f"Skipping {src_name} → {dst_name}: source unreachable")
-                continue
-            if not dst.is_reachable():
-                log.warning(f"Skipping {src_name} → {dst_name}: destination unreachable")
-                continue
-
+        for src_name, src in reachable.items():
             # Find latest snapshot on source
             code, out, _ = src.ssh(
                 f"ls -1t {src.snapshot_path}/ 2>/dev/null | grep '^mixer-' | head -1"
@@ -268,31 +258,35 @@ class Mixer:
             latest_snap = out.strip()
             src_path = f"{src.snapshot_path}/{latest_snap}"
 
-            if src.btrfs and dst.btrfs:
-                # btrfs send/receive over SSH
-                log.info(f"btrfs send {src_name}:{latest_snap} → {dst_name}")
-                cmd = (
-                    f"sudo btrfs send {src_path} | "
-                    f"ssh {dst.user}@{dst.host} 'sudo btrfs receive {dst.receive_path}/'"
-                )
-                code, out, err = src.ssh(cmd, timeout=600)
-            else:
-                # rsync fallback
-                log.info(f"rsync {src_name}:{latest_snap} → {dst_name}")
-                cmd = (
-                    f"rsync -azP --delete {src_path}/ "
-                    f"{dst.user}@{dst.host}:{dst.receive_path}/{latest_snap}/"
-                )
-                code, out, err = src.ssh(cmd, timeout=600)
+            # Send to every OTHER reachable machine
+            for dst_name, dst in reachable.items():
+                if dst_name == src_name:
+                    continue  # don't send to yourself
 
-            if code == 0:
-                log.info(f"Distributed: {src_name} → {dst_name} ({latest_snap})")
-                self._log_history("distribute", f"{src_name} → {dst_name}: {latest_snap}")
-            else:
-                log.error(f"Distribution failed {src_name} → {dst_name}: {err[:200]}")
-                self._log_history("distribute_fail", f"{src_name} → {dst_name}: {err[:100]}")
+                log.info(f"  {src_name} → {dst_name} ({latest_snap})")
+
+                if src.btrfs and dst.btrfs:
+                    cmd = (
+                        f"sudo btrfs send {src_path} | "
+                        f"ssh {dst.user}@{dst.host} 'sudo btrfs receive {dst.receive_path}/'"
+                    )
+                    code, out, err = src.ssh(cmd, timeout=600)
+                else:
+                    cmd = (
+                        f"rsync -azP --delete {src_path}/ "
+                        f"{dst.user}@{dst.host}:{dst.receive_path}/{latest_snap}/"
+                    )
+                    code, out, err = src.ssh(cmd, timeout=600)
+
+                if code == 0:
+                    log.info(f"  done: {src_name} → {dst_name}")
+                    self._log_history("distribute", f"{src_name} → {dst_name}: {latest_snap}")
+                else:
+                    log.error(f"  FAILED: {src_name} → {dst_name}: {err[:100]}")
+                    self._log_history("distribute_fail", f"{src_name} → {dst_name}: {err[:100]}")
 
         self._save_state()
+        log.info("Distribution complete. Every machine holds a snapshot of every other.")
 
     # ── Restore ───────────────────────────────────────
     def restore(self, from_machine: str, snapshot_name: Optional[str] = None):

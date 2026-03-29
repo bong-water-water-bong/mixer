@@ -16,13 +16,18 @@
 
 ## what is mixer?
 
-One app that SSH's into every machine on the network, takes snapshots, and distributes them around a ring. While you're looking at one machine, Shadow already moved the data to another. No NAS. No single point of failure.
+One app that SSH's into every machine on the network, takes snapshots, and distributes them to every other machine. Full ring bus — every machine holds a snapshot of every other machine. While you're looking at one machine, Shadow already moved the data to all the others. No NAS. No single point of failure.
 
 ```
-ryzen ──snapshot──→ strix-halo ──snapshot──→ minisforum ──snapshot──→ ryzen
+        ryzen ←──→ strix-halo
+          ↕    ╲  ╱    ↕
+          ↕     ╲╱     ↕
+          ↕     ╱╲     ↕
+          ↕    ╱  ╲    ↕
+      minisforum ←──→ sligar
 ```
 
-Every machine holds a snapshot of another. If any machine dies, its data lives on the next one in the ring.
+4 machines. Each holds 3 snapshots. Any machine dies — the other three have its data.
 
 ## install
 
