@@ -1,0 +1,15 @@
+[Unit]
+Description=mixer — Shadow's distributed mesh snapshots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/mixer/mixer.py daemon --interval 6
+Restart=on-failure
+RestartSec=30
+Environment=MIXER_CONFIG=/etc/mixer/config.json
+
+[Install]
+WantedBy=multi-user.target

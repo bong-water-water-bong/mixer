@@ -1,0 +1,41 @@
+{
+    "ring": ["ryzen", "strix-halo", "minisforum"],
+    "machines": [
+        {
+            "name": "ryzen",
+            "host": "192.168.50.185",
+            "user": "bcloud",
+            "snapshot_path": "/srv/mixer/snapshots",
+            "receive_path": "/srv/mixer/ring",
+            "os_type": "linux",
+            "btrfs": true
+        },
+        {
+            "name": "strix-halo",
+            "host": "192.168.50.69",
+            "user": "bcloud",
+            "snapshot_path": "/srv/mixer/snapshots",
+            "receive_path": "/srv/mixer/ring",
+            "os_type": "linux",
+            "btrfs": true
+        },
+        {
+            "name": "minisforum",
+            "host": "192.168.50.61",
+            "user": "bcloud",
+            "snapshot_path": "C:/Users/bcloud/mixer/snapshots",
+            "receive_path": "C:/Users/bcloud/mixer/ring",
+            "os_type": "windows",
+            "btrfs": false
+        },
+        {
+            "name": "sligar",
+            "host": "192.168.50.184",
+            "user": "bcloud",
+            "snapshot_path": "/srv/mixer/snapshots",
+            "receive_path": "/srv/mixer/ring",
+            "os_type": "linux",
+            "btrfs": true
+        }
+    ]
+}

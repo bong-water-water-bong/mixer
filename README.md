@@ -4,7 +4,11 @@
 
 ### no nas. no single point of failure. every machine backs up another.
 
-**distributed mesh snapshot system for [halo-ai](https://github.com/bong-water-water-bong/halo-ai) — btrfs snapshots over ssh in a ring**
+**Shadow's distributed mesh snapshot system for [halo-ai](https://github.com/bong-water-water-bong/halo-ai)**
+
+*btrfs snapshots over ssh in a ring — the Kansas City Shuffle*
+
+*stamped by the architect*
 
 </div>
 
@@ -12,128 +16,70 @@
 
 ## what is mixer?
 
-mixer is a distributed backup system where every machine on your network holds a snapshot of another machine. no central NAS, no single point of failure. if any machine dies, its latest snapshot lives on another machine in the mesh.
+One app that SSH's into every machine on the network, takes snapshots, and distributes them around a ring. While you're looking at one machine, Shadow already moved the data to another. No NAS. No single point of failure.
 
 ```
-ryzen ──snapshot──→ strixhalo
-strixhalo ──snapshot──→ minisforum
-minisforum ──snapshot──→ ryzen
+ryzen ──snapshot──→ strix-halo ──snapshot──→ minisforum ──snapshot──→ ryzen
 ```
 
-every machine runs mixer. every machine takes its own local snapshots (normal btrfs/snapper). but mixer also sends one snapshot to the next machine in the ring over ssh. so every machine has:
+Every machine holds a snapshot of another. If any machine dies, its data lives on the next one in the ring.
 
-1. its own local snapshots (normal)
-2. one snapshot from another machine (mixer)
+## install
 
-if your hard drive dies and you can't recover your local snapshots, the mixer snapshot on the other machine has you covered.
+```bash
+git clone https://github.com/bong-water-water-bong/mixer.git
+cd mixer
+bash install.sh
+```
 
-## why not a nas?
+Edit `/etc/mixer/config.json` with your machines, then:
 
-| nas | mixer |
-|---|---|
-| single point of failure | no single point — distributed |
-| nas dies, backups gone | one machine dies, snapshot lives elsewhere |
-| extra hardware cost | uses existing disk space |
-| one physical location | spans your whole network |
-| you maintain it | self-managing, self-healing |
-| another thing to break | nothing extra to break |
+```bash
+mixer status        # see the mesh
+mixer run           # snapshot everything + distribute
+mixer daemon        # run every 6 hours (or systemctl start mixer)
+```
 
 ## how it works
 
-1. **ring topology** — machines form a ring. each sends snapshots to the next.
-2. **btrfs send/receive** — incremental, efficient, native. only sends changes.
-3. **ssh transport** — encrypted, authenticated, uses existing ssh keys.
-4. **scheduled** — systemd timer runs daily (or hourly, configurable).
-5. **self-healing** — if a machine goes offline, mixer skips it and retries next cycle.
-6. **space managed** — keeps only the last N snapshots on each remote machine.
+1. Shadow SSH's into each machine in the ring
+2. Takes a btrfs read-only snapshot (or rsync for non-btrfs like Windows)
+3. Sends that snapshot to the NEXT machine via `btrfs send | ssh btrfs receive`
+4. Every machine ends up with:
+   - Its own local snapshots (normal)
+   - One snapshot from the previous machine in the ring (mixer)
 
 ## commands
 
-```bash
-# show the ring — who backs up who
-mixer ring
+| Command | What it does |
+|---------|-------------|
+| `mixer status` | Show all machines, snapshot counts, disk space, reachability |
+| `mixer snapshot [machine]` | Take a snapshot on one machine |
+| `mixer distribute` | Send snapshots around the ring |
+| `mixer restore <from>` | Pull a snapshot from another machine |
+| `mixer run` | Full cycle: snapshot all + distribute all |
+| `mixer daemon` | Run continuously (default: every 6 hours) |
 
-# manually send snapshot to your backup partner
-mixer send
+## the mesh
 
-# receive a snapshot from your source partner
-mixer receive
+| Machine | Role | OS | btrfs |
+|---------|------|----|-------|
+| ryzen | Primary workstation | Arch Linux | yes |
+| strix-halo | GPU / AI inference | Arch Linux | yes |
+| minisforum | Office PC | Windows 11 | no (rsync) |
+| sligar | Compute / training | Arch Linux | yes |
 
-# check status of all machines in the mesh
-mixer status
+## why "Kansas City Shuffle"?
 
-# add a new machine to the ring
-mixer join <hostname>
+> *Everyone looks left, Shadow moves the data right.*
 
-# remove a machine from the ring
-mixer leave <hostname>
+The beauty of the ring is that no machine holds its own backup on itself. The snapshot is always somewhere else. If a drive dies, if ransomware hits, if an update goes sideways — the snapshot is on a machine that wasn't affected.
 
-# restore from a remote snapshot
-mixer restore <hostname> <snapshot>
+Shadow doesn't ask permission. He doesn't announce himself. He moves in the shadows, and when everything goes wrong, he's the one who has the data.
 
-# show all remote snapshots stored on this machine
-mixer list
-```
+## Shadow
 
-## configuration
-
-```ini
-# /etc/mixer.conf
-
-[mesh]
-# this machine's name
-hostname = ryzen
-
-# who do i send my snapshots to?
-backup_target = strixhalo
-
-# who sends their snapshots to me?
-backup_source = minisforum
-
-# ssh connection details
-ssh_user = bcloud
-ssh_key = ~/.ssh/id_ed25519
-
-[snapshots]
-# what subvolumes to snapshot and send
-subvolumes = /,/home
-
-# how many remote snapshots to keep
-keep_remote = 3
-
-# how many local snapshots to keep
-keep_local = 10
-
-[schedule]
-# how often to send (systemd timer)
-interval = daily
-
-# time to run
-time = 03:00
-```
-
-## setup
-
-```bash
-# install on every machine
-git clone https://github.com/bong-water-water-bong/mixer.git /opt/mixer
-cd /opt/mixer && sudo ./install.sh
-
-# on machine A
-mixer join strixhalo    # A sends to strixhalo
-mixer join --source minisforum  # minisforum sends to A
-
-# repeat for each machine in the ring
-# mixer auto-detects btrfs subvolumes and configures snapshotting
-```
-
-## the family
-
-| member | role |
-|---|---|
-| [halo ai](https://github.com/bong-water-water-bong/halo-ai) | the father — bare-metal ai stack |
-| [vault](https://github.com/bong-water-water-bong/vault) | backup verification — checks mixer's work |
-| [mixer](https://github.com/bong-water-water-bong/mixer) | distributed mesh snapshots — no nas needed |
+Shadow is agent #6 in the [halo-ai family](https://github.com/bong-water-water-bong/halo-ai), part of Meek's Reflex security group. He monitors file integrity and manages the SSH mesh. mixer is his primary tool.
 
 ## license
 
