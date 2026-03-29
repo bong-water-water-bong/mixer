@@ -87,6 +87,7 @@ Shadow doesn't run on a timer. He watches the network. When traffic drops and th
 | `mixer pxe-start` | Start the PXE boot server |
 | `mixer pxe-stop` | Stop the PXE boot server |
 | `mixer update-isos` | Download/update recovery ISOs (Arch, CachyOS, Windows) |
+| `mixer offsite [mount]` | Backup to USB drive — auto-detects, copies, ejects |
 
 ## the mesh
 
@@ -120,6 +121,20 @@ mixer pxe-install ryzen
 ```
 
 ISOs are downloaded and ready. Arch Linux, CachyOS, Windows 11. Shadow keeps them current. The recovery server is always one command away on any machine in the mesh.
+
+## offsite backup — USB drive
+
+Plug in a USB drive. One command. Shadow copies the latest snapshot from every machine in the mesh, writes a manifest, syncs, ejects. Grab the drive. Take it offsite.
+
+```
+mixer offsite
+```
+
+- Auto-detects the USB drive — no mount point needed
+- Copies latest snapshot from every reachable machine
+- Writes a manifest with timestamps and machine list
+- Syncs and auto-ejects when done
+- House burns down, you've got everything on a drive in your truck
 
 ## why "Kansas City Shuffle"?
 

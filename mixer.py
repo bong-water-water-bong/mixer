@@ -693,6 +693,137 @@ WantedBy=multi-user.target
         print()
         self._log_history("pxe_install", f"PXE server installed on {target}")
 
+    # ── Offsite USB Backup ─────────────────────────────
+    def offsite_backup(self, mount_point: str = ""):
+        """Detect USB drive, copy latest snapshots from all machines, eject when done.
+        Grab the drive. Take it offsite. House burns down, you've got everything."""
+        # Auto-detect USB drive if no mount point given
+        if not mount_point:
+            mount_point = self._detect_usb()
+            if not mount_point:
+                log.error("No USB drive detected. Plug one in or specify mount point.")
+                print("\n  No USB drive found. Plug in a drive and try again.")
+                print("  Or specify: mixer offsite /mnt/usb\n")
+                return
+
+        mount = Path(mount_point)
+        if not mount.is_mount() and not mount.exists():
+            log.error(f"{mount_point} is not mounted")
+            return
+
+        backup_dir = mount / "mixer-offsite"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n  Shadow — offsite backup to {mount_point}\n")
+
+        # Copy latest snapshot from each machine's local store
+        total_copied = 0
+        for name in self.ring:
+            m = self.machines.get(name)
+            if not m or not m.is_reachable():
+                print(f"  {name}: offline — skipping")
+                continue
+
+            # Find latest snapshot
+            if m.os_type == "windows":
+                code, out, _ = m.ssh(
+                    f'powershell -Command "(Get-ChildItem \'{m.snapshot_path}\' -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name"'
+                )
+            else:
+                code, out, _ = m.ssh(
+                    f"ls -1t {m.snapshot_path}/ 2>/dev/null | grep '^mixer-' | head -1"
+                )
+
+            if code != 0 or not out.strip():
+                print(f"  {name}: no snapshots — skipping")
+                continue
+
+            snap_name = out.strip()
+            dest = backup_dir / snap_name
+            print(f"  {name}: copying {snap_name}...")
+
+            if m.os_type == "windows":
+                src_path = f"{m.snapshot_path}\\{snap_name}"
+                code, _, err = run(
+                    f"scp -r {m.user}@{m.host}:'{src_path}' '{dest}'",
+                    shell=True, timeout=600
+                )
+            else:
+                src_path = f"{m.snapshot_path}/{snap_name}"
+                code, _, err = run(
+                    f"rsync -a {m.user}@{m.host}:{src_path}/ {dest}/",
+                    shell=True, timeout=600
+                )
+
+            if code == 0:
+                total_copied += 1
+                print(f"  {name}: done")
+            else:
+                print(f"  {name}: FAILED — {err[:80]}")
+
+        # Write manifest
+        manifest = {
+            "created": datetime.now(timezone.utc).isoformat(),
+            "machine_count": total_copied,
+            "machines": self.ring,
+            "note": "offsite backup by Shadow — mixer for halo-ai",
+        }
+        (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+        # Sync and optionally eject
+        print(f"\n  Syncing drive...")
+        run(["sync"], timeout=30)
+
+        print(f"\n  Offsite backup complete: {total_copied}/{len(self.ring)} machines")
+        print(f"  Location: {backup_dir}")
+
+        # Auto-eject
+        drive_dev = self._get_drive_device(mount_point)
+        if drive_dev:
+            print(f"  Ejecting {drive_dev}...")
+            run(["sudo", "umount", mount_point], timeout=10)
+            run(["sudo", "udisksctl", "power-off", "-b", drive_dev], timeout=10)
+            print(f"  Drive ejected safely. Take it offsite.\n")
+        else:
+            print(f"  Unmount manually: sudo umount {mount_point}\n")
+
+        self._log_history("offsite_backup", f"{total_copied} machines backed up to USB")
+        self._save_state()
+
+    def _detect_usb(self) -> str:
+        """Find a mounted USB drive."""
+        try:
+            code, out, _ = run("lsblk -nro NAME,TRAN,MOUNTPOINT | grep usb", shell=True)
+            if code == 0:
+                for line in out.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[2] != "":
+                        return parts[2]
+            # Check common mount points
+            for mp in ["/mnt/usb", "/run/media"]:
+                p = Path(mp)
+                if p.exists():
+                    for child in p.iterdir():
+                        if child.is_mount():
+                            return str(child)
+        except Exception:
+            pass
+        return ""
+
+    def _get_drive_device(self, mount_point: str) -> str:
+        """Get the block device for a mount point."""
+        try:
+            code, out, _ = run(f"findmnt -n -o SOURCE '{mount_point}'", shell=True)
+            if code == 0 and out:
+                # Strip partition number to get the drive device
+                dev = out.strip()
+                import re
+                base = re.sub(r'\d+$', '', dev)
+                return base
+        except Exception:
+            pass
+        return ""
+
     # ── Network Load Detection ────────────────────────
     def _network_is_quiet(self, threshold_mbps: float = 50.0) -> bool:
         """Check if network is under light load. Shadow waits for downtime."""
@@ -809,6 +940,9 @@ def main():
 
     sub.add_parser("update-isos", help="Download/update recovery ISOs")
 
+    off_p = sub.add_parser("offsite", help="Backup to USB drive for offsite storage")
+    off_p.add_argument("mount", nargs="?", default="", help="USB mount point (auto-detects if empty)")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -852,6 +986,8 @@ def main():
         mixer.pxe_install(args.target)
     elif args.command == "update-isos":
         mixer.update_isos()
+    elif args.command == "offsite":
+        mixer.offsite_backup(args.mount)
 
 
 if __name__ == "__main__":
