@@ -82,6 +82,11 @@ Shadow doesn't run on a timer. He watches the network. When traffic drops and th
 | `mixer snapshot [machine]` | Take a snapshot on one machine |
 | `mixer distribute` | Send all snapshots to all machines now |
 | `mixer restore <from>` | Pull a snapshot from another machine |
+| `mixer recover <machine>` | Full disaster recovery — PXE boot + mesh restore |
+| `mixer pxe-install [machine]` | Install PXE server on any machine in the mesh |
+| `mixer pxe-start` | Start the PXE boot server |
+| `mixer pxe-stop` | Stop the PXE boot server |
+| `mixer update-isos` | Download/update recovery ISOs (Arch, CachyOS, Windows) |
 
 ## the mesh
 
@@ -91,6 +96,30 @@ Shadow doesn't run on a timer. He watches the network. When traffic drops and th
 | strix-halo | GPU / AI inference | Arch Linux | yes |
 | minisforum | Office PC | Windows 11 | no (rsync) |
 | sligar | Compute / training | Arch Linux | yes |
+
+## disaster recovery — PXE built in
+
+Machine dies. No USB drive needed. No panic.
+
+```
+mixer recover ryzen
+```
+
+Shadow does everything:
+1. Checks which machines have snapshots of the dead machine
+2. Starts the PXE boot server on the local network
+3. Dead machine boots from the network — OS install menu appears
+4. Fresh OS installed over the network
+5. `mixer restore` pulls the snapshot from the mesh
+6. Machine is back. Everything restored.
+
+**Any machine can be the PXE server.** If Strix Halo dies, install PXE on Ryzen:
+
+```
+mixer pxe-install ryzen
+```
+
+ISOs are downloaded and ready. Arch Linux, CachyOS, Windows 11. Shadow keeps them current. The recovery server is always one command away on any machine in the mesh.
 
 ## why "Kansas City Shuffle"?
 

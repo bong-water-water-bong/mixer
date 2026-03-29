@@ -477,6 +477,222 @@ class Mixer:
             except Exception:
                 continue
 
+    # ── PXE Recovery ──────────────────────────────────
+    PXE_DIR = Path("/srv/pxe")
+    PXE_ISOS = {
+        "arch": {
+            "url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso",
+            "file": "archlinux.iso",
+            "os_type": "linux",
+        },
+        "cachyos": {
+            "url": "https://mirror.cachyos.org/ISO/latest/cachyos-desktop-linux-250329.iso",
+            "file": "cachyos.iso",
+            "os_type": "linux",
+        },
+        "windows": {
+            "url": "",  # Must be downloaded manually from Microsoft
+            "file": "win11.iso",
+            "os_type": "windows",
+        },
+    }
+
+    def recover(self, machine_name: str):
+        """Full disaster recovery: start PXE, guide restore from mesh."""
+        m = self.machines.get(machine_name)
+        if not m:
+            log.error(f"Unknown machine: {machine_name}")
+            return
+
+        os_type = m.os_type if m else "linux"
+        print(f"\n  Shadow — disaster recovery for {machine_name}\n")
+
+        # Check if PXE ISOs exist
+        self._ensure_isos()
+
+        # Start PXE services
+        print("  [1/4] Starting PXE boot server...")
+        run(["sudo", "systemctl", "start", "pxe-http", "pxe-dnsmasq"], timeout=10)
+        log.info("PXE services started")
+
+        # Find which machines have this machine's snapshot
+        print(f"  [2/4] Finding snapshots of {machine_name} across the mesh...")
+        sources = []
+        for name, other in self.machines.items():
+            if name == machine_name:
+                continue
+            if not other.is_reachable():
+                continue
+            code, out, _ = other.ssh(
+                f"ls -1t {other.receive_path}/ 2>/dev/null | grep 'mixer-{machine_name}' | head -1"
+            )
+            if code == 0 and out.strip():
+                sources.append({"machine": name, "snapshot": out.strip()})
+                print(f"    found: {out.strip()} on {name}")
+
+        if not sources:
+            print(f"    WARNING: no snapshots found for {machine_name}")
+
+        # Instructions
+        print(f"\n  [3/4] Recovery instructions for {machine_name}:\n")
+        print(f"    1. Plug {machine_name} into ethernet")
+        print(f"    2. Enter BIOS → enable PXE/network boot")
+        print(f"    3. Boot from network — PXE menu will appear")
+        if os_type == "linux":
+            print(f"    4. Select 'Arch Linux' from the boot menu")
+            print(f"    5. Install Arch (or use the halo-ai installer)")
+        else:
+            print(f"    4. Select 'Windows 11' from the boot menu")
+            print(f"    5. Complete Windows installation")
+        print()
+
+        if sources:
+            best = sources[0]
+            print(f"  [4/4] After OS install, restore from mesh:\n")
+            print(f"    mixer restore {best['machine']} --snapshot {best['snapshot']}")
+        else:
+            print(f"  [4/4] No mesh snapshots available — fresh install only")
+
+        print(f"\n  PXE server is running. Waiting for {machine_name} to boot...")
+        print(f"  Stop PXE when done: mixer pxe-stop\n")
+
+        self._log_history("recover", f"PXE recovery started for {machine_name}")
+        self._save_state()
+
+    def pxe_stop(self):
+        """Stop PXE services."""
+        run(["sudo", "systemctl", "stop", "pxe-http", "pxe-dnsmasq"], timeout=10)
+        log.info("PXE services stopped")
+        print("  PXE server stopped.")
+
+    def _ensure_isos(self):
+        """Download ISOs if missing."""
+        self.PXE_DIR.mkdir(parents=True, exist_ok=True)
+        for name, iso in self.PXE_ISOS.items():
+            path = self.PXE_DIR / iso["file"]
+            if path.exists():
+                size_mb = path.stat().st_size // (1024 * 1024)
+                print(f"    {name}: {iso['file']} ({size_mb}MB) — ready")
+            elif iso["url"]:
+                print(f"    {name}: downloading {iso['file']}...")
+                code, _, err = run(
+                    ["curl", "-fSL", "-o", str(path), iso["url"]],
+                    timeout=3600
+                )
+                if code == 0:
+                    size_mb = path.stat().st_size // (1024 * 1024)
+                    print(f"    {name}: downloaded ({size_mb}MB)")
+                    self._log_history("iso_download", f"{name}: {iso['file']}")
+                else:
+                    print(f"    {name}: download failed — {err[:100]}")
+            else:
+                print(f"    {name}: {iso['file']} — NOT FOUND (manual download required)")
+
+    def update_isos(self):
+        """Download or update all ISOs to latest versions."""
+        print("\n  Shadow — updating recovery ISOs\n")
+        self._ensure_isos()
+        self._log_history("iso_update", "ISOs checked/updated")
+        print("\n  ISOs ready for PXE recovery.\n")
+
+    def pxe_install(self, target: str = "localhost"):
+        """Install PXE server on any machine in the mesh.
+        If Strix Halo dies, any other Linux machine becomes the recovery server."""
+        print(f"\n  Shadow — installing PXE server on {target}\n")
+
+        if target == "localhost":
+            ssh_fn = lambda cmd, **kw: run(cmd, shell=True, **kw)
+        else:
+            m = self.machines.get(target)
+            if not m:
+                log.error(f"Unknown machine: {target}")
+                return
+            if not m.is_reachable():
+                log.error(f"{target} is unreachable")
+                return
+            ssh_fn = lambda cmd, **kw: m.ssh(cmd, **kw)
+
+        # Install dnsmasq if not present
+        print("  [1/5] Installing dnsmasq...")
+        ssh_fn("which dnsmasq || sudo pacman -S dnsmasq --noconfirm", timeout=120)
+
+        # Create PXE directories
+        print("  [2/5] Creating PXE directories...")
+        ssh_fn("sudo mkdir -p /srv/pxe/tftp /srv/pxe/isos", timeout=10)
+
+        # Install iPXE bootloader
+        print("  [3/5] Setting up iPXE bootloader...")
+        ssh_fn("which ipxe 2>/dev/null || sudo pacman -S ipxe --noconfirm 2>/dev/null || true", timeout=120)
+        ssh_fn("cp /usr/share/ipxe/ipxe-x86_64.efi /srv/pxe/tftp/ipxe.efi 2>/dev/null || curl -fSL -o /srv/pxe/tftp/ipxe.efi 'https://boot.ipxe.org/ipxe.efi'", timeout=60)
+
+        # Create PXE boot menu
+        print("  [4/5] Creating boot menu...")
+        boot_script = """#!ipxe
+menu Shadow Recovery — halo-ai mesh
+item arch    Arch Linux (latest)
+item cachyos CachyOS (latest)
+item win11   Windows 11
+item shell   iPXE Shell
+choose target && goto ${target}
+
+:arch
+kernel http://${next-server}:8090/archlinux/boot/x86_64/vmlinuz-linux
+initrd http://${next-server}:8090/archlinux/boot/x86_64/initramfs-linux.img
+imgargs vmlinuz-linux archiso_http_srv=http://${next-server}:8090/archlinux/ ip=dhcp
+boot
+
+:cachyos
+kernel http://${next-server}:8090/cachyos/boot/vmlinuz-linux
+initrd http://${next-server}:8090/cachyos/boot/initramfs-linux.img
+imgargs vmlinuz-linux img_dev=/dev/nfs img_loop=cachyos.iso ip=dhcp
+boot
+
+:win11
+kernel http://${next-server}:8090/wimboot
+initrd http://${next-server}:8090/win11/bootmgr          bootmgr
+initrd http://${next-server}:8090/win11/boot/bcd          bcd
+initrd http://${next-server}:8090/win11/boot/boot.sdi     boot.sdi
+initrd http://${next-server}:8090/win11/sources/boot.wim  boot.wim
+boot
+
+:shell
+shell
+"""
+        ssh_fn(f"cat > /srv/pxe/tftp/boot.ipxe << 'IPXE'\n{boot_script}IPXE", timeout=10)
+
+        # Create dnsmasq PXE config
+        print("  [5/5] Configuring dnsmasq for PXE...")
+        dnsmasq_conf = """# PXE boot server — Shadow recovery
+# Does NOT run DHCP — proxy mode only
+port=0
+interface=*
+dhcp-range=tag:pxe,192.168.0.0,proxy
+dhcp-boot=tag:pxe,ipxe.efi
+pxe-service=tag:pxe,X86-64_EFI,"Shadow Recovery",ipxe.efi
+enable-tftp
+tftp-root=/srv/pxe/tftp
+log-dhcp
+"""
+        ssh_fn(f"sudo tee /etc/dnsmasq.d/pxe.conf << 'CONF'\n{dnsmasq_conf}CONF", timeout=10)
+
+        # Create systemd services
+        pxe_http_service = """[Unit]
+Description=PXE HTTP File Server
+[Service]
+ExecStart=/usr/bin/python3 -m http.server 8090 --directory /srv/pxe
+WorkingDirectory=/srv/pxe
+[Install]
+WantedBy=multi-user.target
+"""
+        ssh_fn(f"sudo tee /etc/systemd/system/pxe-http.service << 'SVC'\n{pxe_http_service}SVC", timeout=10)
+        ssh_fn("sudo systemctl daemon-reload", timeout=10)
+
+        print(f"\n  PXE server installed on {target}.")
+        print(f"  Start with: mixer pxe-start")
+        print(f"  ISOs needed in /srv/pxe/ — run: mixer update-isos")
+        print()
+        self._log_history("pxe_install", f"PXE server installed on {target}")
+
     # ── Network Load Detection ────────────────────────
     def _network_is_quiet(self, threshold_mbps: float = 50.0) -> bool:
         """Check if network is under light load. Shadow waits for downtime."""
@@ -582,6 +798,17 @@ def main():
 
     sub.add_parser("nodes", help="List all nodes in the mesh")
 
+    rec_p = sub.add_parser("recover", help="Full disaster recovery — PXE boot + mesh restore")
+    rec_p.add_argument("machine", help="Machine to recover")
+
+    sub.add_parser("pxe-start", help="Start PXE boot server")
+    sub.add_parser("pxe-stop", help="Stop PXE boot server")
+
+    pxe_inst = sub.add_parser("pxe-install", help="Install PXE server on any machine")
+    pxe_inst.add_argument("target", nargs="?", default="localhost", help="Machine name or localhost")
+
+    sub.add_parser("update-isos", help="Download/update recovery ISOs")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -614,6 +841,17 @@ def main():
                 status = "online" if m.is_reachable() else "offline"
                 print(f"  {name:15} {m.host:20} {m.os_type:10} {status}")
         print()
+    elif args.command == "recover":
+        mixer.recover(args.machine)
+    elif args.command == "pxe-start":
+        run(["sudo", "systemctl", "start", "pxe-http", "pxe-dnsmasq"], timeout=10)
+        print("  PXE server started. Machines can network boot now.")
+    elif args.command == "pxe-stop":
+        mixer.pxe_stop()
+    elif args.command == "pxe-install":
+        mixer.pxe_install(args.target)
+    elif args.command == "update-isos":
+        mixer.update_isos()
 
 
 if __name__ == "__main__":
