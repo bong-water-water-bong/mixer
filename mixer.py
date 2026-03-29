@@ -337,16 +337,134 @@ class Mixer:
         self._save_state()
         log.info("Shadow has completed his rounds. No single point of failure.")
 
-    # ── Daemon ────────────────────────────────────────
-    def daemon(self, interval_hours: int = 6):
-        """Run continuously."""
-        log.info(f"Shadow daemon started — running every {interval_hours}h")
+    # ── Add Node ──────────────────────────────────────
+    def add_node(self, name: str, host: str, user: str = "bcloud",
+                 snapshot_path: str = "/srv/mixer/snapshots",
+                 receive_path: str = "/srv/mixer/ring",
+                 os_type: str = "linux", btrfs: bool = True):
+        """Add a new machine to the mesh. It immediately joins the full ring bus."""
+        m = Machine(name=name, host=host, user=user,
+                    snapshot_path=snapshot_path, receive_path=receive_path,
+                    os_type=os_type, btrfs=btrfs)
+
+        if not m.is_reachable():
+            log.error(f"{name} ({host}) is not reachable via SSH")
+            return False
+
+        # Create directories on the new node
+        m.ssh(f"mkdir -p {snapshot_path} {receive_path}")
+
+        # Add to config
+        self.machines[name] = m
+        if name not in self.ring:
+            self.ring.append(name)
+
+        # Save updated config
+        self._save_config()
+        self._log_history("add_node", f"{name} ({host}) joined the mesh")
+        log.info(f"{name} added to mesh. {len(self.ring)} nodes in the ring bus.")
+        return True
+
+    def remove_node(self, name: str):
+        """Remove a machine from the mesh."""
+        if name in self.machines:
+            del self.machines[name]
+        if name in self.ring:
+            self.ring.remove(name)
+        self._save_config()
+        self._log_history("remove_node", f"{name} removed from mesh")
+        log.info(f"{name} removed. {len(self.ring)} nodes remain.")
+
+    def _save_config(self):
+        """Write current mesh state back to config."""
+        cfg = {
+            "ring": self.ring,
+            "machines": [
+                {
+                    "name": m.name, "host": m.host, "user": m.user,
+                    "snapshot_path": m.snapshot_path, "receive_path": m.receive_path,
+                    "os_type": m.os_type, "btrfs": m.btrfs,
+                }
+                for m in self.machines.values()
+            ]
+        }
+        for p in [CONFIG_PATH, DEFAULT_CONFIG]:
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(cfg, indent=2))
+                break
+            except Exception:
+                continue
+
+    # ── Network Load Detection ────────────────────────
+    def _network_is_quiet(self, threshold_mbps: float = 50.0) -> bool:
+        """Check if network is under light load. Shadow waits for downtime."""
+        try:
+            # Read bytes, wait 2 seconds, read again
+            def _get_bytes():
+                with open("/proc/net/dev") as f:
+                    for line in f:
+                        if ":" in line and "lo" not in line:
+                            parts = line.split()
+                            return int(parts[1]) + int(parts[9])  # rx + tx
+                return 0
+
+            b1 = _get_bytes()
+            time.sleep(2)
+            b2 = _get_bytes()
+            mbps = ((b2 - b1) * 8) / (2 * 1_000_000)  # megabits per second
+            log.debug(f"Network load: {mbps:.1f} Mbps (threshold: {threshold_mbps})")
+            return mbps < threshold_mbps
+        except Exception:
+            return True  # if we can't read, assume quiet
+
+    def _wait_for_quiet_network(self, max_wait_minutes: int = 60):
+        """Wait until network load drops below threshold. Patient. In the shadows."""
+        if self._network_is_quiet():
+            return True
+
+        log.info("Network is busy. Shadow is waiting for downtime...")
+        waited = 0
+        while waited < max_wait_minutes * 60:
+            time.sleep(30)
+            waited += 30
+            if self._network_is_quiet():
+                log.info(f"Network is quiet after {waited}s. Shadow moves.")
+                return True
+
+        log.warning(f"Network still busy after {max_wait_minutes}m. Proceeding anyway.")
+        return False
+
+    # ── Daemon (Watchdog Mode) ────────────────────────
+    def daemon(self):
+        """Shadow's watchdog. No timer. Watches the network, works when it's quiet.
+        Set it and forget it. He knows when to move."""
+        log.info("Shadow watchdog started. Watching. Waiting. Set and forget.")
+
+        last_snapshot = 0
+        min_interval = 4 * 3600  # At least 4 hours between runs
+        check_interval = 60      # Check every minute
+
         while True:
             try:
-                self.run()
+                now = time.time()
+                time_since_last = now - last_snapshot
+
+                # Only consider running if enough time has passed
+                if time_since_last >= min_interval:
+                    # Wait for network to be quiet
+                    if self._network_is_quiet():
+                        log.info("Network is quiet. Shadow is making his rounds.")
+                        self.run()
+                        last_snapshot = time.time()
+                        log.info("Shadow has completed his rounds. Going quiet.")
+                    # else: stay quiet, check again next cycle
+
+                time.sleep(check_interval)
+
             except Exception as e:
-                log.error(f"Run failed: {e}")
-            time.sleep(interval_hours * 3600)
+                log.error(f"Watchdog error: {e}")
+                time.sleep(check_interval)
 
 
 def main():
@@ -363,14 +481,25 @@ def main():
     snap_p = sub.add_parser("snapshot", help="Take snapshot on a machine")
     snap_p.add_argument("machine", nargs="?", default=os.uname().nodename)
 
-    sub.add_parser("distribute", help="Send snapshots around the ring")
+    sub.add_parser("distribute", help="Send snapshots to all machines")
 
     rest_p = sub.add_parser("restore", help="Pull snapshot from another machine")
     rest_p.add_argument("from_machine", help="Machine to pull from")
     rest_p.add_argument("--snapshot", help="Specific snapshot name")
 
-    daemon_p = sub.add_parser("daemon", help="Run continuously")
-    daemon_p.add_argument("--interval", type=int, default=6, help="Hours between runs")
+    sub.add_parser("daemon", help="Watchdog mode — works when network is quiet")
+
+    add_p = sub.add_parser("add", help="Add a new machine to the mesh")
+    add_p.add_argument("name", help="Machine name")
+    add_p.add_argument("host", help="SSH host or IP")
+    add_p.add_argument("--user", default="bcloud", help="SSH user")
+    add_p.add_argument("--os", default="linux", dest="os_type", help="OS type (linux/windows)")
+    add_p.add_argument("--no-btrfs", action="store_true", help="Use rsync instead of btrfs")
+
+    rm_p = sub.add_parser("remove", help="Remove a machine from the mesh")
+    rm_p.add_argument("name", help="Machine name to remove")
+
+    sub.add_parser("nodes", help="List all nodes in the mesh")
 
     args = parser.parse_args()
     if not args.command:
@@ -390,7 +519,20 @@ def main():
     elif args.command == "run":
         mixer.run()
     elif args.command == "daemon":
-        mixer.daemon(args.interval)
+        mixer.daemon()
+    elif args.command == "add":
+        mixer.add_node(args.name, args.host, user=args.user,
+                       os_type=args.os_type, btrfs=not args.no_btrfs)
+    elif args.command == "remove":
+        mixer.remove_node(args.name)
+    elif args.command == "nodes":
+        print(f"\n  Mesh nodes ({len(mixer.ring)}):\n")
+        for name in mixer.ring:
+            m = mixer.machines.get(name)
+            if m:
+                status = "online" if m.is_reachable() else "offline"
+                print(f"  {name:15} {m.host:20} {m.os_type:10} {status}")
+        print()
 
 
 if __name__ == "__main__":

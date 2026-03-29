@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 /usr/local/lib/mixer/mixer.py daemon --interval 6
+ExecStart=/usr/bin/python3 /usr/local/lib/mixer/mixer.py daemon
 Restart=on-failure
 RestartSec=30
 Environment=MIXER_CONFIG=/etc/mixer/config.json

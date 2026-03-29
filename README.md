@@ -19,15 +19,24 @@
 One app that SSH's into every machine on the network, takes snapshots, and distributes them to every other machine. Full ring bus — every machine holds a snapshot of every other machine. While you're looking at one machine, Shadow already moved the data to all the others. No NAS. No single point of failure.
 
 ```
-        ryzen ←──→ strix-halo
-          ↕    ╲  ╱    ↕
-          ↕     ╲╱     ↕
-          ↕     ╱╲     ↕
-          ↕    ╱  ╲    ↕
-      minisforum ←──→ sligar
+                 ryzen
+               ╱   |   ╲
+             ╱     |     ╲
+      sligar ──────+────── strix-halo
+             ╲     |     ╱
+               ╲   |   ╱
+              minisforum
 ```
 
-4 machines. Each holds 3 snapshots. Any machine dies — the other three have its data.
+Full ring bus. Every arrow goes both ways. Every machine holds a snapshot of every other machine. 4 machines = 3 snapshots each. Add a 5th machine, everyone gets a 4th snapshot. Scales automatically.
+
+**Add a new PC — one command, it joins the mesh instantly:**
+
+```bash
+mixer add my-new-pc 192.168.50.100
+```
+
+Done. Shadow sends it everyone else's snapshots and takes one of its own.
 
 ## install
 
@@ -37,33 +46,42 @@ cd mixer
 bash install.sh
 ```
 
-Edit `/etc/mixer/config.json` with your machines, then:
-
 ```bash
 mixer status        # see the mesh
-mixer run           # snapshot everything + distribute
-mixer daemon        # run every 6 hours (or systemctl start mixer)
+mixer daemon        # set and forget — Shadow handles the rest
 ```
 
 ## how it works
 
-1. Shadow SSH's into each machine in the ring
+1. Shadow SSH's into every machine in the mesh
 2. Takes a btrfs read-only snapshot (or rsync for non-btrfs like Windows)
-3. Sends that snapshot to the NEXT machine via `btrfs send | ssh btrfs receive`
-4. Every machine ends up with:
-   - Its own local snapshots (normal)
-   - One snapshot from the previous machine in the ring (mixer)
+3. Sends that snapshot to EVERY other machine — full ring bus
+4. Every machine ends up with a snapshot of every other machine
+5. Add a new PC — one command, instant mesh member
+
+## the watchdog
+
+Shadow doesn't run on a timer. He watches the network. When traffic drops and the network is quiet, he moves. Snapshots distribute during downtime so they never interfere with your work. Set it and forget it.
+
+- Monitors network load in real-time
+- Waits for traffic to drop below threshold
+- Minimum 4 hours between runs — won't spam
+- If the network never goes quiet, he'll proceed after an hour of waiting
+- Runs as a systemd service — survives reboots, starts on boot
 
 ## commands
 
 | Command | What it does |
 |---------|-------------|
-| `mixer status` | Show all machines, snapshot counts, disk space, reachability |
+| `mixer status` | Show all machines, snapshot counts, disk space |
+| `mixer run` | Full cycle now: snapshot all + distribute to all |
+| `mixer daemon` | Watchdog mode — works when network is quiet |
+| `mixer add <name> <host>` | Add a new machine to the mesh instantly |
+| `mixer remove <name>` | Remove a machine from the mesh |
+| `mixer nodes` | List all machines in the mesh |
 | `mixer snapshot [machine]` | Take a snapshot on one machine |
-| `mixer distribute` | Send snapshots around the ring |
+| `mixer distribute` | Send all snapshots to all machines now |
 | `mixer restore <from>` | Pull a snapshot from another machine |
-| `mixer run` | Full cycle: snapshot all + distribute all |
-| `mixer daemon` | Run continuously (default: every 6 hours) |
 
 ## the mesh
 
@@ -78,9 +96,9 @@ mixer daemon        # run every 6 hours (or systemctl start mixer)
 
 > *Everyone looks left, Shadow moves the data right.*
 
-The beauty of the ring is that no machine holds its own backup on itself. The snapshot is always somewhere else. If a drive dies, if ransomware hits, if an update goes sideways — the snapshot is on a machine that wasn't affected.
+No machine holds its own backup on itself. The snapshot is always somewhere else — everywhere else. If a drive dies, if ransomware hits, if an update goes sideways — the other machines have it. All of them.
 
-Shadow doesn't ask permission. He doesn't announce himself. He moves in the shadows, and when everything goes wrong, he's the one who has the data.
+Shadow doesn't run on a schedule. He doesn't announce himself. He watches the network, waits for quiet, and moves data while you sleep. Set and forget. A weapon that fires itself.
 
 ## Shadow
 
